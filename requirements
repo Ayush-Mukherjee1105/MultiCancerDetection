@@ -1,0 +1,9 @@
+numpy
+scikit-learn
+xgboost
+joblib
+tqdm
+opencv-python
+tensorflow>=2.0.0
+pillow
+shap
