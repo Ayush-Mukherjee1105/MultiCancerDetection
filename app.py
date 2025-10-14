@@ -27,7 +27,7 @@ except Exception:
     TF_AVAILABLE = False
 
 st.set_page_config(page_title="Lung Cancer Ensemble Classifier", layout="wide")
-st.title("Lung Cancer Ensemble Classifier — Frontend")
+st.title("Lung Cancer Ensemble Classifier")
 
 # Sidebar controls
 st.sidebar.header("Model selection & options")
@@ -238,25 +238,41 @@ if st.button("Run prediction"):
         if "stack" in models_dict and "stack" in selected_models:
             st.markdown("**Stacking (meta-estimator) calculation**")
             stack_model = models_dict["stack"]
-            base_models = [m for m in selected_models if m != "stack"]
-            if len(base_models) == 0:
-                st.info("No base models selected for stacking demonstration (select base models too).")
-            else:
-                meta = []
-                for b in base_models:
-                    meta.extend(per_model_probs[b])
-                meta = np.array(meta).reshape(1, -1)
-                try:
-                    # try to use final_estimator directly if accessible
-                    meta_probs = stack_model.final_estimator_.predict_proba(meta)
-                    st.write("Meta-estimator (final) probabilities:", {label_encoder.classes_[i]: float(meta_probs[0][i]) for i in range(meta_probs.shape[1])})
-                    st.success(f"Stack predicted: {label_encoder.classes_[int(np.argmax(meta_probs))]}")
-                except Exception:
+            
+            # --- FIX START ---
+            # The meta-estimator was trained on a specific set of base models.
+            # We must use the predictions from THAT set, not the currently selected models.
+            try:
+                # Get the names of the base estimators the stacker was trained on
+                base_estimator_names = [est[0] for est in stack_model.estimators]
+                st.write(f"Stacking model expects predictions from: `{', '.join(base_estimator_names)}`")
+
+                meta_features = []
+                for name in base_estimator_names:
+                    if name in per_model_probs:
+                        meta_features.extend(per_model_probs[name])
+                    else:
+                        st.error(f"The required base model '{name}' for stacking was not run. Please select it and re-run.")
+                        # Invalidate meta_features to stop further execution
+                        meta_features = [] 
+                        break
+                
+                if meta_features:
+                    meta = np.array(meta_features).reshape(1, -1)
+                    # --- FIX ---
+                    # We have already computed the meta-features.
+                    # We must call predict() on the final_estimator, NOT the whole stack.
                     try:
+                        meta_probs = stack_model.final_estimator_.predict_proba(meta)
+                        st.write("Meta-estimator (final) probabilities:", {label_encoder.classes_[i]: float(meta_probs[0][i]) for i in range(meta_probs.shape[1])})
+                        st.success(f"Stack predicted: {label_encoder.classes_[int(np.argmax(meta_probs))]}")
+                    except Exception:
                         meta_pred = stack_model.final_estimator_.predict(meta)
-                        st.write("Meta-estimator prediction:", meta_pred)
-                    except Exception as e:
-                        st.write("Stack meta-eval failed:", e)
+                        st.success(f"Stack predicted: {label_encoder.classes_[int(meta_pred[0])]}")
+
+            except Exception as e:
+                st.write("Stack meta-eval failed:", e)
+            # --- END FIX ---
 
         # ---------- SHAP explanation (robust, full block) ----------
         if show_shap:
