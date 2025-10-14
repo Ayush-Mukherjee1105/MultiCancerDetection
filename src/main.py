@@ -11,6 +11,7 @@ def parse_args():
     p.add_argument('--unzip', action='store_true', help='Unzip dataset')
     p.add_argument('--extract', action='store_true', help='Extract embeddings')
     p.add_argument('--train', action='store_true', help='Train models')
+    
     p.add_argument('--evaluate', action='store_true', help='Evaluate models')
     p.add_argument('--run_all', action='store_true', help='Run unzip -> extract -> train -> evaluate')
     return p.parse_args()
@@ -25,7 +26,6 @@ def run_all():
     print("Evaluating models...")
     evaluate_models()
     print("All steps completed.")
-# ...existing code...
 
 if __name__ == '__main__':
     args = parse_args()
