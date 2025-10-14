@@ -201,11 +201,6 @@ if st.button("Run prediction"):
         for mname, probs in per_model_probs.items():
             st.write(f"**{mname}** : ", {label_encoder.classes_[i]: float(probs[i]) for i in range(len(probs))})
 
-        # Formulas display
-        st.subheader("Formulas & calculation steps")
-        st.latex(r"\hat{y}_{majority} = \mathrm{mode}\{\hat{y}_1, \hat{y}_2, ..., \hat{y}_M\}")
-        st.latex(r"P(y=c) = \frac{\sum_{m=1}^M w_m P_m(y=c)}{\sum_{m=1}^M w_m}")
-
         # Soft-voting numeric example
         if len(per_model_probs) >= 2 and use_soft_vote:
             st.markdown("**Soft-voting numeric example (per-class):**")
