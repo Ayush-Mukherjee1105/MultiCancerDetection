@@ -98,36 +98,52 @@ def preprocess_image_to_embedding(pil_img):
         hist = hist / (hist.sum()+1e-9)
         return hist
 
-# Image upload + sample selection
+# Image upload + sample selection (robust, uses session_state)
 col1, col2 = st.columns([1,2])
 with col1:
     st.subheader("Input")
-    uploaded = st.file_uploader("Upload an image (jpg/png) or choose a sample", type=["jpg","jpeg","png"])
+    uploaded_file = st.file_uploader("Upload an image (jpg/png) or choose a sample", type=["jpg","jpeg","png"])
+
+    # When user clicks the sample button, choose a random file and store its path in session_state
     if sample_button:
-        # pick a random image from extracted dataset
         import random
         all_images = []
         if os.path.exists(EXTRACT_DIR):
             for root, _, files in os.walk(EXTRACT_DIR):
                 for f in files:
-                    if f.lower().endswith((".jpg",".jpeg",".png",".tif",".bmp")):
-                        all_images.append(os.path.join(root,f))
+                    if f.lower().endswith((".jpg", ".jpeg", ".png", ".tif", ".bmp")):
+                        all_images.append(os.path.join(root, f))
         if all_images:
             chosen = random.choice(all_images)
-            uploaded = open(chosen, "rb")
+            st.session_state['sample_path'] = chosen
             st.success(f"Selected random sample: {chosen}")
         else:
             st.warning("No images found in dataset folder.")
-    if uploaded:
+            # clear any previous sample
+            if 'sample_path' in st.session_state:
+                del st.session_state['sample_path']
+
+    # Determine source: uploaded file (priority) else sample_path in session_state
+    pil = None
+    if uploaded_file is not None:
         try:
-            bytes_data = uploaded.read()
+            bytes_data = uploaded_file.read()
             pil = Image.open(io.BytesIO(bytes_data))
-            st.image(pil, caption="Uploaded image", use_column_width=True)
+            st.image(pil, caption="Uploaded image", use_container_width=True)
         except Exception as e:
             st.error("Could not read uploaded file: " + str(e))
             pil = None
+    elif 'sample_path' in st.session_state:
+        sample_path = st.session_state['sample_path']
+        try:
+            pil = Image.open(sample_path)
+            st.image(pil, caption=f"Sample image: {os.path.basename(sample_path)}", use_container_width=True)
+        except Exception as e:
+            st.error("Could not open sample image: " + str(e))
+            pil = None
     else:
         pil = None
+
 
 with col2:
     st.subheader("Selected models")
@@ -250,38 +266,121 @@ if st.button("Run prediction"):
                     except Exception as e2:
                         st.write("Stack meta-eval failed:", e2)
 
-        # Optionally SHAP (may be slow)
-        if show_shap:
-            try:
-                import shap
-                st.subheader("SHAP explanation (approx)")
-                # pick first model that is tree-based
+# ===== Robust SHAP explanation block (replace existing SHAP code) =====
+if show_shap:
+    try:
+        import shap
+        import matplotlib.pyplot as plt
+        st.subheader("SHAP explanation (single-sample & summary)")
+
+        # Load background data (must have been saved during training)
+        background_path = os.path.join(OUTPUT_DIR, "data_splits.joblib")
+        if not os.path.exists(background_path):
+            st.info("No data_splits.joblib found in outputs/. Train pipeline with saving enabled to use SHAP.")
+        else:
+            splits = joblib.load(background_path)
+            # Use a small background sample (max 200 rows) to speed up explainer
+            X_bg = splits.get('X_train', None)
+            if X_bg is None:
+                X_bg = splits.get('X_test', None)
+            if X_bg is None:
+                st.info("No training/test arrays found in data_splits.joblib to use as SHAP background.")
+            else:
+                # reduce background size for speed and memory
+                bg_size = min(200, X_bg.shape[0])
+                rng = np.random.default_rng(0)
+                idx = rng.choice(X_bg.shape[0], size=bg_size, replace=False)
+                background = X_bg[idx]
+
+                # pick a tree-based model for SHAP
                 tree_model = None
+                tree_name = None
                 for nm in selected_models:
                     m = models_dict.get(nm)
                     if m is None: continue
-                    # heuristic: tree-based models have feature_importances_
+                    # heuristic: tree-based models expose feature_importances_ or xgboost classes
                     if hasattr(m, "feature_importances_") or m.__class__.__name__.lower().startswith("xgb"):
-                        tree_model = (nm, m)
+                        tree_model = m
+                        tree_name = nm
                         break
-                if tree_model is None:
-                    st.info("No tree-based model selected (RandomForest/GradientBoost/XGBoost recommended) for SHAP.")
-                else:
-                    nm, m = tree_model
-                    explainer = shap.TreeExplainer(m)
-                    shap_values = explainer.shap_values(X_emb)
-                    st.write(f"Showing SHAP (model: {nm}) — summary plot below (may take a moment).")
-                    # produce a plot and show
-                    import matplotlib.pyplot as plt
-                    fig = plt.figure(figsize=(6,4))
+                # if stacking selected and no direct tree found, try final_estimator_
+                if tree_model is None and "stack" in models_dict:
+                    st.info("Using stack final estimator for SHAP (if tree-based).")
                     try:
-                        shap.summary_plot(shap_values, X_emb, show=False)
+                        candidate = models_dict["stack"].final_estimator_
+                        if hasattr(candidate, "feature_importances_") or candidate.__class__.__name__.lower().startswith("xgb"):
+                            tree_model = candidate
+                            tree_name = "stack.final_estimator"
                     except Exception:
-                        # alternate for multiclass
-                        shap.summary_plot(shap_values, X_emb, class_names=label_encoder.classes_, show=False)
-                    st.pyplot(fig)
-            except Exception as e:
-                st.error("SHAP failed (maybe not installed or model incompatible): " + str(e))
+                        pass
+
+                if tree_model is None:
+                    st.info("No tree-based model found among selected models. SHAP tree explainer requires tree models (RF/GBM/XGBoost).")
+                else:
+                    st.write(f"Explaining model: **{tree_name}** (using background size={background.shape[0]})")
+
+                    # Use TreeExplainer (fast) or shap.Explainer for generality
+                    try:
+                        explainer = shap.TreeExplainer(tree_model, data=background, feature_perturbation="interventional")
+                        # For XGBoost multi-class, TreeExplainer returns list of arrays; shap_values will be structured
+                        shap_values = explainer.shap_values(X_emb)
+                        # For single sample, prefer a waterfall plot (interpretable)
+                        # For new shap versions, shap.plots.waterfall expects shap.Explanation object or values directly
+                        sample_idx = 0
+                        # create waterfall or bar for single sample
+                        fig = plt.figure(figsize=(6,4))
+                        try:
+                            # If shap_values is list (multiclass), pick class predicted
+                            if isinstance(shap_values, list):
+                                # choose predicted class index from model prediction
+                                pred_class_idx = int(np.argmax(models_dict[tree_name if tree_name in models_dict else list(models_dict.keys())[0]].predict_proba(X_emb)[0]))
+                                vals = shap_values[pred_class_idx][sample_idx]
+                                base_value = explainer.expected_value[pred_class_idx] if hasattr(explainer, 'expected_value') else None
+                                shap.plots._waterfall.waterfall_legacy(base_value, vals, feature_names=None, show=False)
+                            else:
+                                # shap_values is a 2D array (samples x features)
+                                vals = shap_values[sample_idx]
+                                base_value = explainer.expected_value if hasattr(explainer, 'expected_value') else None
+                                shap.plots._waterfall.waterfall_legacy(base_value, vals, feature_names=None, show=False)
+                            st.pyplot(fig)
+                        except Exception:
+                            # fallback: simple bar of absolute mean SHAP contributions across background + single sample
+                            st.info("Could not produce waterfall; showing bar of |SHAP| for features (single sample).")
+                            if isinstance(shap_values, list):
+                                sv = np.abs(shap_values[0]).mean(axis=0)
+                            else:
+                                sv = np.abs(shap_values).mean(axis=0)
+                            topk = min(20, len(sv))
+                            idxs = np.argsort(sv)[-topk:][::-1]
+                            feat_names = [f"f{i}" for i in range(len(sv))]
+                            plt.clf()
+                            plt.barh(range(len(idxs))[::-1], sv[idxs])
+                            plt.yticks(range(len(idxs)), [feat_names[i] for i in idxs])
+                            plt.xlabel("|mean SHAP value|")
+                            st.pyplot(plt.gcf())
+
+                        # If we have many background samples, also show a small summary bar (global importance)
+                        if background.shape[0] > 30:
+                            st.subheader("Global approximate importance (mean |SHAP| on background)")
+                            if isinstance(shap_values, list):
+                                # average across classes and background
+                                mean_abs = np.mean([np.abs(sv).mean(axis=0) for sv in shap_values], axis=0)
+                            else:
+                                mean_abs = np.abs(shap_values).mean(axis=0)
+                            topk = min(15, len(mean_abs))
+                            idxs = np.argsort(mean_abs)[-topk:][::-1]
+                            feat_names = [f"f{i}" for i in range(len(mean_abs))]
+                            fig2 = plt.figure(figsize=(6,4))
+                            plt.barh(range(len(idxs))[::-1], mean_abs[idxs])
+                            plt.yticks(range(len(idxs)), [feat_names[i] for i in idxs])
+                            plt.xlabel("mean |SHAP value|")
+                            st.pyplot(fig2)
+
+                    except Exception as e:
+                        st.error("SHAP TreeExplainer failed: " + str(e))
+    except Exception as e:
+        st.error("SHAP not available or failed: " + str(e))
+# ===== end SHAP block =====
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("Developed for the Lung Cancer Ensemble project. Ensure outputs/ contains trained models.")
