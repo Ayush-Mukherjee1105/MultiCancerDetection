@@ -106,5 +106,3 @@ Your browser will open with the application ready to go.
 ## 📈 Final Results
 
 The model achieved a **95.7% weighted F1-score** on a held-out test set of 4,725 images.
-
-![Confusion Matrix](outputs/stacking_ensemble_confusion_matrix.png)
