@@ -1,0 +1,25 @@
+# Core AI and ML Libraries
+torch
+torchvision
+timm
+scikit-learn
+xgboost
+imbalanced-learn
+shap
+joblib
+
+# Data Handling and Utilities
+pandas
+numpy
+tqdm
+Pillow
+
+# Interactive Application
+streamlit
+
+# Kaggle API for Data Download
+kaggle
+
+# Plotting and Visualization
+matplotlib
+seaborn

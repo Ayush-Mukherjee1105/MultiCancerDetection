@@ -2,5 +2,5 @@ __pycache__/
 .venv/
 outputs/
 *.pyc
-archive.zip
 data/
+models/

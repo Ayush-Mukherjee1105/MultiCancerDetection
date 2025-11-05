@@ -1,76 +1,105 @@
-import os, joblib, numpy as np
+# src/embeddings.py
+
+import os
+import numpy as np
+import pandas as pd
+from pathlib import Path
 from tqdm import tqdm
-from src.utils import find_images, images_by_class
-from src.config import EXTRACT_DIR, OUTPUT_DIR, MAX_PER_CLASS, BATCH_SIZE
-import cv2
+import logging
 
-try:
-    from tensorflow.keras.preprocessing import image
-    from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
-    TF_AVAILABLE = True
-except Exception:
-    TF_AVAILABLE = False
+# Import the feature extractor we already built
+from transformer_model import VisionTransformerExtractor
 
-def gather_sample_paths(base_dir, max_per_class=MAX_PER_CLASS):
-    all_images = find_images(base_dir)
-    by_cls = images_by_class(all_images)
-    paths, labels = [], []
-    for cls, imgs in by_cls.items():
-        take = min(len(imgs), max_per_class)
-        sel = imgs[:take]
-        paths += sel
-        labels += [cls]*len(sel)
-    return paths, labels
+# --- Configuration ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-def extract_resnet_embeddings(paths, batch_size=BATCH_SIZE):
-    model = ResNet50(weights='imagenet', include_top=False, pooling='avg')
-    feats = []
-    for i in tqdm(range(0, len(paths), batch_size), desc='ResNet embeddings'):
-        batch = paths[i:i+batch_size]
-        arr = []
-        for p in batch:
-            try:
-                img = image.load_img(p, target_size=(224,224))
-                x = image.img_to_array(img)
-                if x.shape[-1] == 1:
-                    x = np.repeat(x, 3, axis=-1)
-                x = np.expand_dims(x, axis=0)
-                x = preprocess_input(x)
-                arr.append(x[0])
-            except Exception:
-                arr.append(np.zeros((224,224,3), dtype=np.float32))
-        arr = np.stack(arr, axis=0)
-        feat = model.predict(arr, verbose=0)
-        feats.append(feat)
-    X = np.vstack(feats)
-    return X
+# --- Paths (This is where the variable is defined) ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+CLEAN_DATA_DIR = BASE_DIR / "data" / "clean"
+EMBEDDINGS_DIR = BASE_DIR / "data" / "embeddings"
+EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
-def extract_histogram_features(paths):
-    feats = []
-    for p in tqdm(paths, desc='histograms'):
-        img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            feats.append([0]*32)
+# --- Define labels to explicitly ignore ---
+LABELS_TO_IGNORE = {"test", "10"}
+
+# --- Main Embedding Generation Logic ---
+
+def generate_embeddings():
+    """
+    Iterates through the cleaned data, extracts embeddings using the ViT model,
+    and saves the embeddings, labels, and a manifest file.
+    """
+    logging.info("--- Starting Embedding Generation ---")
+    
+    try:
+        extractor = VisionTransformerExtractor()
+    except Exception as e:
+        logging.error(f"Failed to initialize VisionTransformerExtractor: {e}")
+        return
+
+    image_formats = ['*.png', '*.jpg', '*.jpeg']
+    all_image_paths = []
+    for fmt in image_formats:
+        all_image_paths.extend(CLEAN_DATA_DIR.rglob(fmt))
+
+    if not all_image_paths:
+        logging.error(f"No images found in {CLEAN_DATA_DIR}. Please check the data preparation step.")
+        return
+        
+    logging.info(f"Found {len(all_image_paths)} total image files. Filtering and processing...")
+
+    all_embeddings = []
+    all_labels = []
+    manifest_data = []
+    skipped_count = 0
+
+    for path in tqdm(all_image_paths, desc="Extracting Embeddings"):
+        label = path.parent.name
+        
+        # Skip ignored labels and any remaining mask files
+        if label in LABELS_TO_IGNORE or '_mask' in path.name:
+            skipped_count += 1
             continue
-        img = cv2.resize(img, (128,128))
-        h = cv2.calcHist([img],[0],None,[32],[0,256]).flatten()
-        h = h / (h.sum()+1e-9)
-        feats.append(h.tolist())
-    return np.array(feats)
+            
+        dataset = path.parent.parent.name
+        embedding = extractor.get_embedding(str(path))
+        
+        if embedding is not None:
+            all_embeddings.append(embedding)
+            all_labels.append(label)
+            manifest_data.append({
+                "image_path": str(path.relative_to(BASE_DIR)),
+                "label": label,
+                "dataset": dataset
+            })
+        else:
+            logging.warning(f"Skipping image due to an error: {path}")
 
-def run_embedding_extraction(extract_dir=EXTRACT_DIR, output_dir=OUTPUT_DIR):
-    os.makedirs(output_dir, exist_ok=True)
-    paths, labels = gather_sample_paths(extract_dir)
-    print('Collected', len(paths), 'images for embedding extraction.')
-    if TF_AVAILABLE:
-        print('TensorFlow available — extracting ResNet50 embeddings.')
-        X = extract_resnet_embeddings(paths)
-    else:
-        print('TensorFlow not available — extracting histogram features (fallback).')
-        X = extract_histogram_features(paths)
-    joblib.dump({'paths': paths, 'labels': labels, 'X': X}, os.path.join(output_dir, 'embeddings.joblib'))
-    print('Saved embeddings.joblib to', output_dir)
-    return os.path.join(output_dir, 'embeddings.joblib')
+    if skipped_count > 0:
+        logging.info(f"Skipped {skipped_count} images from ignored directories or mask files.")
+
+    if not all_embeddings:
+        logging.error("No embeddings were generated. Please check your data folders and the ignore list.")
+        return
+
+    embeddings_array = np.array(all_embeddings)
+    labels_array = np.array(all_labels)
+    
+    # --- The lines that caused the error now have their variable defined ---
+    embeddings_path = EMBEDDINGS_DIR / "embeddings.npy"
+    labels_path = EMBEDDINGS_DIR / "labels.npy"
+    manifest_path = EMBEDDINGS_DIR / "manifest.csv"
+    
+    np.save(embeddings_path, embeddings_array)
+    np.save(labels_path, labels_array)
+    
+    manifest_df = pd.DataFrame(manifest_data)
+    manifest_df.to_csv(manifest_path, index=False)
+    
+    logging.info("--- Embedding Generation Complete ---")
+    logging.info(f"Saved embeddings array of shape {embeddings_array.shape} to: {embeddings_path}")
+    logging.info(f"Saved labels array of shape {labels_array.shape} to: {labels_path}")
+    logging.info(f"Saved manifest CSV with {len(manifest_df)} entries to: {manifest_path}")
 
 if __name__ == '__main__':
-    run_embedding_extraction()
+    generate_embeddings()
