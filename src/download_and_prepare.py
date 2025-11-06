@@ -1,5 +1,3 @@
-# src/download_and_prepare.py
-
 import os
 import zipfile
 import shutil

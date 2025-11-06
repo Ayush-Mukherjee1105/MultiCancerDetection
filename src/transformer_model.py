@@ -1,5 +1,3 @@
-# src/transformer_model.py
-
 import torch
 import timm
 from PIL import Image
